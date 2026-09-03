@@ -5,8 +5,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
-// ⚠️ YAHAN APNA WHATSAPP NUMBER LIKHEIN (Country code ke saath, bina '+' ya space ke)
-// Example for Pakistan: "923001234567"
+// Aapka WhatsApp number international format me (without '+' or spaces)
 const PHONE_NUMBER = "923195653021"; 
 
 async function startBot() {
@@ -15,12 +14,12 @@ async function startBot() {
 
     const sock = makeWASocket({
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // QR terminal par print nahi hoga
+        printQRInTerminal: false, // QR code hide karein
         auth: state,
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    // Agar session pehle se registered nahi hai toh Pairing Code request karein
+    // Agar session registered nahi hai toh Pairing Code request karein
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -39,7 +38,7 @@ async function startBot() {
     // Credentials update handler
     sock.ev.on('creds.update', saveCreds);
 
-    // Connection update handler
+    // Connection status handler
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         
@@ -54,7 +53,7 @@ async function startBot() {
         }
     });
 
-    // Messages handler
+    // Incoming messages handler
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
