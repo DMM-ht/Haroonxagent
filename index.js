@@ -3,999 +3,907 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
+} = require("@whiskeysockets/baileys");
 
-const pino = require('pino');
-const QRCode = require('qrcode');
-const express = require('express');
-const localtunnel = require('localtunnel');
-const crypto = require('crypto');
+const QRCode = require("qrcode");
+const pino = require("pino");
+const fs = require("fs");
+const path = require("path");
 
-// ===============================
-// CONFIG
-// ===============================
+// ==========================================
+// FIREBASE
+// ==========================================
 
 const FIREBASE_URL = process.env.FIREBASE_URL;
-const PORT = 3000;
 
-// Random URL token
-const QR_TOKEN = crypto.randomBytes(16).toString('hex');
+// ==========================================
+// SETTINGS
+// ==========================================
 
+const SESSION_FOLDER = path.join(__dirname, "session_data");
+const QR_FILE = path.join(__dirname, "qr.png");
+
+// User order states
 const orderStates = {};
 
-let currentQR = null;
-let botSocket = null;
-
-// ===============================
-// WEB SERVER
-// ===============================
-
-const app = express();
-
-app.get(`/qr/${QR_TOKEN}`, (req, res) => {
-
-    res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0,
-               maximum-scale=1.0,
-               user-scalable=no">
-
-<title>WhatsApp Bot QR</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-html,
-body {
-    margin: 0;
-    padding: 0;
-
-    width: 100%;
-    height: 100%;
-
-    overflow: hidden;
-
-    font-family: Arial, sans-serif;
-
-    background: #111;
-}
-
-body {
-    display: flex;
-
-    justify-content: center;
-    align-items: center;
-}
-
-.container {
-
-    width: 100vw;
-    height: 100vh;
-
-    display: flex;
-
-    flex-direction: column;
-
-    justify-content: center;
-    align-items: center;
-
-    padding: 20px;
-}
-
-h1 {
-    color: white;
-
-    font-size: 28px;
-
-    margin: 0 0 10px 0;
-}
-
-.status {
-
-    color: #bbb;
-
-    font-size: 16px;
-
-    margin-bottom: 20px;
-
-    text-align: center;
-}
-
-.qr-box {
-
-    width: min(80vw, 420px);
-    height: min(80vw, 420px);
-
-    background: white;
-
-    border-radius: 20px;
-
-    padding: 20px;
-
-    display: flex;
-
-    justify-content: center;
-    align-items: center;
-
-    box-shadow:
-        0 0 30px rgba(255,255,255,0.15);
-}
-
-#qr {
-
-    width: 100%;
-    height: 100%;
-
-    object-fit: contain;
-
-    image-rendering: pixelated;
-}
-
-.instructions {
-
-    color: #ddd;
-
-    text-align: center;
-
-    margin-top: 20px;
-
-    font-size: 15px;
-
-    line-height: 1.6;
-}
-
-#connected {
-
-    display: none;
-
-    color: #7CFF8A;
-
-    font-size: 22px;
-
-    font-weight: bold;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-    <h1>📱 WhatsApp Bot</h1>
-
-    <div class="status" id="status">
-        Waiting for QR Code...
-    </div>
-
-    <div class="qr-box">
-
-        <img
-            id="qr"
-            alt="WhatsApp QR Code"
-        >
-
-    </div>
-
-    <div class="instructions">
-
-        WhatsApp کھولیں<br>
-        Linked Devices → Link a device<br>
-        پھر اس QR Code کو scan کریں
-
-    </div>
-
-    <div id="connected">
-        ✅ WhatsApp Connected
-    </div>
-
-</div>
-
-<script>
-
-const qrImage = document.getElementById("qr");
-const statusText = document.getElementById("status");
-const connectedText = document.getElementById("connected");
-
-function showQR(data) {
-
-    qrImage.src = data;
-
-    qrImage.style.display = "block";
-
-    statusText.innerText =
-        "Scan this QR with WhatsApp";
-
-}
-
-function connected() {
-
-    qrImage.style.display = "none";
-
-    statusText.style.display = "none";
-
-    connectedText.style.display = "block";
-
-}
-
-// Server سے live updates
-const events = new EventSource("/events");
-
-events.onmessage = function(event) {
-
-    const data = JSON.parse(event.data);
-
-    if (data.type === "qr") {
-
-        showQR(data.qr);
-
-    }
-
-    if (data.type === "connected") {
-
-        connected();
-
-    }
-
-};
-
-</script>
-
-</body>
-</html>
-    `);
-
-});
-
-// ===============================
-// SSE CONNECTIONS
-// ===============================
-
-let clients = [];
-
-app.get("/events", (req, res) => {
-
-    res.setHeader(
-        "Content-Type",
-        "text/event-stream"
-    );
-
-    res.setHeader(
-        "Cache-Control",
-        "no-cache"
-    );
-
-    res.setHeader(
-        "Connection",
-        "keep-alive"
-    );
-
-    res.flushHeaders();
-
-    clients.push(res);
-
-    // اگر QR پہلے سے موجود ہے
-    if (currentQR) {
-
-        res.write(
-            `data: ${JSON.stringify({
-                type: "qr",
-                qr: currentQR
-            })}\n\n`
-        );
-
-    }
-
-    req.on("close", () => {
-
-        clients = clients.filter(
-            client => client !== res
-        );
-
+// ==========================================
+// CREATE FOLDERS
+// ==========================================
+
+if (!fs.existsSync(SESSION_FOLDER)) {
+    fs.mkdirSync(SESSION_FOLDER, {
+        recursive: true
     });
-
-});
-
-function broadcast(data) {
-
-    const message =
-        `data: ${JSON.stringify(data)}\n\n`;
-
-    clients.forEach(client => {
-
-        try {
-
-            client.write(message);
-
-        } catch (error) {
-
-            console.log("SSE client error");
-
-        }
-
-    });
-
 }
 
-// ===============================
-// START WEB SERVER
-// ===============================
-
-app.listen(PORT, async () => {
-
-    console.log("");
-    console.log("==========================================");
-    console.log("🌐 QR WEB SERVER STARTED");
-    console.log(`Port: ${PORT}`);
-    console.log("==========================================");
-
-    try {
-
-        const tunnel = await localtunnel({
-            port: PORT
-        });
-
-        const qrURL =
-            `${tunnel.url}/qr/${QR_TOKEN}`;
-
-        console.log("");
-        console.log("==========================================");
-        console.log("📱 WHATSAPP QR PAGE");
-        console.log("==========================================");
-        console.log(qrURL);
-        console.log("==========================================");
-        console.log("");
-
-    } catch (error) {
-
-        console.log(
-            "❌ Tunnel Error:",
-            error.message
-        );
-
-    }
-
-});
-
-// ===============================
+// ==========================================
 // FIREBASE MENU
-// ===============================
+// ==========================================
 
 async function getMenuFromApp() {
-
     try {
+        if (!FIREBASE_URL) {
+            console.log("❌ FIREBASE_URL missing");
+            return [];
+        }
 
-        const response =
-            await fetch(
-                `${FIREBASE_URL}/dishes.json`
+        const response = await fetch(
+            `${FIREBASE_URL}/dishes.json`
+        );
+
+        if (!response.ok) {
+            console.log(
+                "❌ Firebase menu error:",
+                response.status
             );
 
-        const data =
-            await response.json();
+            return [];
+        }
 
-        if (!data) return [];
+        const data = await response.json();
+
+        if (!data) {
+            return [];
+        }
 
         return Object.keys(data).map(key => ({
-
             id: key,
-
-            name: data[key].name,
-
-            price: data[key].price,
-
-            imageUrl: data[key].imageUrl
-
+            name: data[key].name || "Unknown Item",
+            price: data[key].price || 0,
+            imageUrl: data[key].imageUrl || ""
         }));
 
     } catch (error) {
 
-        console.error(
-            "Failed to fetch menu:",
-            error
+        console.log(
+            "❌ Failed to fetch menu:",
+            error.message
         );
 
         return [];
-
     }
-
 }
 
-// ===============================
-// START BOT
-// ===============================
+// ==========================================
+// CREATE QR PNG
+// ==========================================
+
+async function createQRImage(qr) {
+
+    try {
+
+        // Delete old QR
+        if (fs.existsSync(QR_FILE)) {
+            fs.unlinkSync(QR_FILE);
+        }
+
+        // Create new PNG
+        await QRCode.toFile(
+            QR_FILE,
+            qr,
+            {
+                width: 1000,
+                margin: 4,
+                errorCorrectionLevel: "H"
+            }
+        );
+
+        console.log("");
+        console.log("==========================================");
+        console.log("📱 NEW WHATSAPP QR CREATED");
+        console.log("==========================================");
+        console.log(`📁 QR FILE: ${QR_FILE}`);
+        console.log("📸 Open qr.png and scan it with WhatsApp");
+        console.log("==========================================");
+        console.log("");
+
+    } catch (error) {
+
+        console.log(
+            "❌ QR PNG ERROR:",
+            error.message
+        );
+
+    }
+}
+
+// ==========================================
+// DELETE QR AFTER CONNECTION
+// ==========================================
+
+function deleteQR() {
+
+    try {
+
+        if (fs.existsSync(QR_FILE)) {
+
+            fs.unlinkSync(QR_FILE);
+
+            console.log("🗑️ Old QR deleted");
+
+        }
+
+    } catch (error) {
+
+        console.log(
+            "QR delete error:",
+            error.message
+        );
+
+    }
+}
+
+// ==========================================
+// START WHATSAPP BOT
+// ==========================================
 
 async function startBot() {
 
-    if (!FIREBASE_URL) {
+    try {
 
-        console.log(
-            "❌ ERROR: FIREBASE_URL is missing!"
+        if (!FIREBASE_URL) {
+
+            console.log("");
+            console.log("❌ ERROR");
+            console.log("FIREBASE_URL is missing!");
+            console.log("");
+            console.log(
+                "GitHub Secrets → FIREBASE_URL add karo."
+            );
+
+            process.exit(1);
+        }
+
+        console.log("");
+        console.log("==========================================");
+        console.log("🤖 HAROONXAGENT STARTING");
+        console.log("==========================================");
+        console.log("");
+
+        // ======================================
+        // AUTH STATE
+        // ======================================
+
+        const {
+            state,
+            saveCreds
+        } = await useMultiFileAuthState(
+            SESSION_FOLDER
         );
 
-        process.exit(1);
+        // ======================================
+        // BAILEYS VERSION
+        // ======================================
 
-    }
+        const {
+            version
+        } = await fetchLatestBaileysVersion();
 
-    const {
-        state,
-        saveCreds
-    } = await useMultiFileAuthState(
-        "session_data"
-    );
+        console.log(
+            `📦 WhatsApp Version: ${version.join(".")}`
+        );
 
-    const {
-        version
-    } = await fetchLatestBaileysVersion();
+        // ======================================
+        // CREATE SOCKET
+        // ======================================
 
-    const sock = makeWASocket({
+        const sock = makeWASocket({
 
-        version,
+            version,
 
-        auth: state,
+            auth: state,
 
-        printQRInTerminal: false,
+            printQRInTerminal: false,
 
-        logger: pino({
-            level: "silent"
-        }),
+            logger: pino({
+                level: "silent"
+            }),
 
-        browser: [
-            "Haroonxagent",
-            "Chrome",
-            "1.0"
-        ]
+            browser: [
+                "Haroonxagent",
+                "Chrome",
+                "1.0.0"
+            ],
 
-    });
+            markOnlineOnConnect: true
 
-    botSocket = sock;
+        });
 
-    // ===============================
-    // CONNECTION UPDATE
-    // ===============================
+        // ======================================
+        // SAVE CREDENTIALS
+        // ======================================
 
-    sock.ev.on(
-        "connection.update",
-        async update => {
+        sock.ev.on(
+            "creds.update",
+            saveCreds
+        );
 
-            const {
-                connection,
-                lastDisconnect,
-                qr
-            } = update;
+        // ======================================
+        // CONNECTION UPDATE
+        // ======================================
 
-            // NEW QR
-            if (qr) {
+        sock.ev.on(
+            "connection.update",
+            async (update) => {
 
-                console.log("");
-                console.log(
-                    "📱 NEW WHATSAPP QR GENERATED"
-                );
+                const {
+                    connection,
+                    lastDisconnect,
+                    qr
+                } = update;
+
+                // ==================================
+                // NEW QR
+                // ==================================
+
+                if (qr) {
+
+                    await createQRImage(qr);
+
+                }
+
+                // ==================================
+                // CONNECTED
+                // ==================================
+
+                if (connection === "open") {
+
+                    deleteQR();
+
+                    console.log("");
+                    console.log(
+                        "=========================================="
+                    );
+                    console.log(
+                        "✅ WHATSAPP CONNECTED SUCCESSFULLY"
+                    );
+                    console.log(
+                        "🤖 HAROONXAGENT IS ONLINE"
+                    );
+                    console.log(
+                        "=========================================="
+                    );
+                    console.log("");
+
+                }
+
+                // ==================================
+                // CONNECTION CLOSED
+                // ==================================
+
+                if (connection === "close") {
+
+                    const statusCode =
+                        lastDisconnect
+                            ?.error
+                            ?.output
+                            ?.statusCode;
+
+                    console.log("");
+                    console.log(
+                        "⚠️ WhatsApp connection closed"
+                    );
+
+                    console.log(
+                        "Status:",
+                        statusCode
+                    );
+
+                    // Logged out permanently
+                    if (
+                        statusCode ===
+                        DisconnectReason.loggedOut
+                    ) {
+
+                        console.log("");
+                        console.log(
+                            "❌ WhatsApp logged out."
+                        );
+
+                        console.log(
+                            "Delete session_data and scan QR again."
+                        );
+
+                        return;
+                    }
+
+                    // Temporary disconnect
+                    console.log(
+                        "🔄 Reconnecting in 5 seconds..."
+                    );
+
+                    setTimeout(() => {
+
+                        startBot();
+
+                    }, 5000);
+                }
+
+            }
+        );
+
+        // ======================================
+        // INCOMING MESSAGES
+        // ======================================
+
+        sock.ev.on(
+            "messages.upsert",
+            async (m) => {
 
                 try {
 
-                    currentQR =
-                        await QRCode.toDataURL(
-                            qr,
+                    const msg = m.messages[0];
+
+                    if (!msg) {
+                        return;
+                    }
+
+                    // No message
+                    if (!msg.message) {
+                        return;
+                    }
+
+                    // Ignore WhatsApp status
+                    if (
+                        msg.key.remoteJid ===
+                        "status@broadcast"
+                    ) {
+                        return;
+                    }
+
+                    // Ignore our own messages
+                    if (msg.key.fromMe) {
+                        return;
+                    }
+
+                    const sender =
+                        msg.key.remoteJid;
+
+                    // ==================================
+                    // GET MESSAGE TEXT
+                    // ==================================
+
+                    const text = (
+
+                        msg.message.conversation ||
+
+                        msg.message.extendedTextMessage
+                            ?.text ||
+
+                        msg.message.imageMessage
+                            ?.caption ||
+
+                        ""
+
+                    ).trim().toLowerCase();
+
+                    console.log("");
+                    console.log(
+                        `📩 Message: ${text}`
+                    );
+
+                    console.log(
+                        `👤 From: ${sender}`
+                    );
+
+                    // ==================================
+                    // EMPTY MESSAGE
+                    // ==================================
+
+                    if (!text) {
+                        return;
+                    }
+
+                    // ==================================
+                    // WAITING FOR ADDRESS
+                    // ==================================
+
+                    if (
+                        orderStates[sender]
+                            ?.step ===
+                        "WAITING_FOR_ADDRESS"
+                    ) {
+
+                        const customerDetails =
+                            text;
+
+                        const item =
+                            orderStates[sender].item;
+
+                        const customerWaNumber =
+                            sender.split("@")[0];
+
+                        const itemPrice =
+                            parseFloat(
+                                item.price
+                            ) || 0;
+
+                        const deliveryCharge = 50;
+
+                        const total =
+                            itemPrice +
+                            deliveryCharge;
+
+                        // ==================================
+                        // ORDER OBJECT
+                        // ==================================
+
+                        const javaGoatOrder = {
+
+                            userId:
+                                "whatsapp_" +
+                                customerWaNumber,
+
+                            userEmail:
+                                "whatsapp@javagoat.com",
+
+                            phone:
+                                customerWaNumber,
+
+                            address:
+                                customerDetails,
+
+                            location: {
+                                lat: 0,
+                                lng: 0
+                            },
+
+                            items: [
+                                {
+                                    id:
+                                        item.id,
+
+                                    name:
+                                        item.name,
+
+                                    price:
+                                        itemPrice,
+
+                                    img:
+                                        item.imageUrl ||
+                                        "",
+
+                                    quantity: 1
+                                }
+                            ],
+
+                            total:
+                                total.toFixed(2),
+
+                            status:
+                                "Placed",
+
+                            method:
+                                "Cash on Delivery (WhatsApp)",
+
+                            timestamp:
+                                new Date().toISOString()
+                        };
+
+                        // ==================================
+                        // SAVE ORDER TO FIREBASE
+                        // ==================================
+
+                        try {
+
+                            const response =
+                                await fetch(
+                                    `${FIREBASE_URL}/orders.json`,
+                                    {
+                                        method: "POST",
+
+                                        headers: {
+                                            "Content-Type":
+                                                "application/json"
+                                        },
+
+                                        body:
+                                            JSON.stringify(
+                                                javaGoatOrder
+                                            )
+                                    }
+                                );
+
+                            if (!response.ok) {
+
+                                throw new Error(
+                                    `Firebase returned ${response.status}`
+                                );
+
+                            }
+
+                            console.log(
+                                "✅ Order saved to Firebase"
+                            );
+
+                        } catch (error) {
+
+                            console.log(
+                                "❌ Firebase Order Error:",
+                                error.message
+                            );
+
+                        }
+
+                        // ==================================
+                        // SEND CONFIRMATION
+                        // ==================================
+
+                        await sock.sendMessage(
+                            sender,
                             {
-                                width: 800,
-                                margin: 4,
-                                errorCorrectionLevel: "M"
+                                text:
+                                    `✅ *Order Placed Successfully!*\n\n` +
+
+                                    `Thank you! Your order for *${item.name}* is being prepared.\n\n` +
+
+                                    `*Item Price:* ₹${itemPrice}\n` +
+
+                                    `*Delivery:* ₹${deliveryCharge}\n` +
+
+                                    `*Total:* ₹${total.toFixed(2)}\n\n` +
+
+                                    `*Status:* Preparing\n\n` +
+
+                                    `We will deliver your order to the provided address soon.`
                             }
                         );
 
-                    broadcast({
+                        // Clear order state
+                        delete orderStates[sender];
 
-                        type: "qr",
-
-                        qr: currentQR
-
-                    });
-
-                    console.log(
-                        "✅ QR sent to browser"
-                    );
-
-                } catch (error) {
-
-                    console.log(
-                        "QR generation error:",
-                        error
-                    );
-
-                }
-
-            }
-
-            // CONNECTED
-            if (connection === "open") {
-
-                console.log("");
-                console.log(
-                    "=========================================="
-                );
-                console.log(
-                    "✅ JAVAGOAT AI IS ONLINE!"
-                );
-                console.log(
-                    "=========================================="
-                );
-
-                currentQR = null;
-
-                broadcast({
-
-                    type: "connected"
-
-                });
-
-            }
-
-            // DISCONNECTED
-            if (connection === "close") {
-
-                const reason =
-                    lastDisconnect
-                        ?.error
-                        ?.output
-                        ?.statusCode;
-
-                console.log(
-                    "WhatsApp connection closed:",
-                    reason
-                );
-
-                if (
-                    reason !==
-                    DisconnectReason.loggedOut
-                ) {
-
-                    console.log(
-                        "🔄 Reconnecting..."
-                    );
-
-                    setTimeout(
-                        startBot,
-                        3000
-                    );
-
-                } else {
-
-                    console.log(
-                        "❌ WhatsApp logged out."
-                    );
-
-                }
-
-            }
-
-        }
-    );
-
-    sock.ev.on(
-        "creds.update",
-        saveCreds
-    );
-
-    // ===============================
-    // MESSAGES
-    // ===============================
-
-    sock.ev.on(
-        "messages.upsert",
-        async m => {
-
-            const msg = m.messages[0];
-
-            if (
-                !msg.message ||
-                msg.key.remoteJid ===
-                "status@broadcast"
-            ) return;
-
-            if (msg.key.fromMe) return;
-
-            const sender =
-                msg.key.remoteJid;
-
-            const text =
-                (
-                    msg.message.conversation ||
-                    msg.message.extendedTextMessage?.text ||
-                    ""
-                ).toLowerCase();
-
-            console.log(
-                `📩 Query: ${text}`
-            );
-
-            // ===============================
-            // FINISH ORDER
-            // ===============================
-
-            if (
-                orderStates[sender]
-                    ?.step ===
-                "WAITING_FOR_ADDRESS"
-            ) {
-
-                const customerDetails = text;
-
-                const item =
-                    orderStates[sender].item;
-
-                const customerWaNumber =
-                    sender.split("@")[0];
-
-                const javaGoatOrder = {
-
-                    userId:
-                        "whatsapp_" +
-                        customerWaNumber,
-
-                    userEmail:
-                        "whatsapp@javagoat.com",
-
-                    phone:
-                        customerWaNumber,
-
-                    address:
-                        customerDetails,
-
-                    location: {
-                        lat: 0,
-                        lng: 0
-                    },
-
-                    items: [
-                        {
-                            id: item.id,
-
-                            name: item.name,
-
-                            price:
-                                parseFloat(
-                                    item.price
-                                ),
-
-                            img:
-                                item.imageUrl || "",
-
-                            quantity: 1
-                        }
-                    ],
-
-                    total:
-                        (
-                            parseFloat(item.price) +
-                            50
-                        ).toFixed(2),
-
-                    status:
-                        "Placed",
-
-                    method:
-                        "Cash on Delivery (WhatsApp)",
-
-                    timestamp:
-                        new Date().toISOString()
-
-                };
-
-                try {
-
-                    await fetch(
-                        `${FIREBASE_URL}/orders.json`,
-                        {
-                            method: "POST",
-
-                            headers: {
-                                "Content-Type":
-                                    "application/json"
-                            },
-
-                            body:
-                                JSON.stringify(
-                                    javaGoatOrder
-                                )
-                        }
-                    );
-
-                } catch (error) {
-
-                    console.log(
-                        "Firebase Error:",
-                        error
-                    );
-
-                }
-
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-`✅ *Order Placed Successfully!*
-
-Thank you! Your order for *${item.name}* is being prepared.
-
-*Total:* ₹${javaGoatOrder.total} (Inc. Delivery)
-*Status:* Preparing
-
-We will deliver it to your address soon.`
+                        return;
                     }
-                );
 
-                delete orderStates[sender];
+                    // ==================================
+                    // ORDER COMMAND
+                    // ==================================
 
-                return;
+                    if (
+                        text.startsWith("order ")
+                    ) {
 
-            }
-
-            // ===============================
-            // ORDER
-            // ===============================
-
-            if (
-                text.startsWith("order ")
-            ) {
-
-                const productRequested =
-                    text
-                        .replace("order ", "")
-                        .trim()
-                        .toLowerCase();
-
-                const currentMenu =
-                    await getMenuFromApp();
-
-                const matchedItem =
-                    currentMenu.find(
-                        item =>
-                            item.name
-                                .toLowerCase()
-                                .includes(
-                                    productRequested
+                        const productRequested =
+                            text
+                                .replace(
+                                    "order ",
+                                    ""
                                 )
-                    );
+                                .trim()
+                                .toLowerCase();
 
-                if (!matchedItem) {
+                        if (!productRequested) {
 
-                    await sock.sendMessage(
-                        sender,
-                        {
-                            text:
-`❌ Sorry, we couldn't find *${productRequested}* in our menu today.
+                            await sock.sendMessage(
+                                sender,
+                                {
+                                    text:
+                                        "❌ Please type a food name.\n\nExample:\n*order pizza*"
+                                }
+                            );
 
-Type *menu* to see all available items.`
+                            return;
                         }
-                    );
 
-                    return;
+                        // Get current menu
+                        const currentMenu =
+                            await getMenuFromApp();
 
-                }
+                        // Find item
+                        const matchedItem =
+                            currentMenu.find(
+                                item =>
+                                    item.name
+                                        .toLowerCase()
+                                        .includes(
+                                            productRequested
+                                        )
+                            );
 
-                orderStates[sender] = {
+                        // Product not found
+                        if (!matchedItem) {
 
-                    step:
-                        "WAITING_FOR_ADDRESS",
+                            await sock.sendMessage(
+                                sender,
+                                {
+                                    text:
+                                        `❌ Sorry, we couldn't find *${productRequested}* in our menu today.\n\n` +
+                                        `Type *menu* to see all available items.`
+                                }
+                            );
 
-                    item:
-                        matchedItem
-
-                };
-
-                const captionText =
-`🛒 *Order Started!*
-
-You selected: *${matchedItem.name}* (₹${matchedItem.price})
-
-Please reply with your *Full Name, Phone Number, and Delivery Address*.`;
-
-                if (
-                    matchedItem.imageUrl
-                ) {
-
-                    await sock.sendMessage(
-                        sender,
-                        {
-                            image: {
-                                url:
-                                    matchedItem.imageUrl
-                            },
-
-                            caption:
-                                captionText
+                            return;
                         }
-                    );
 
-                } else {
+                        // Save order state
+                        orderStates[sender] = {
 
-                    await sock.sendMessage(
-                        sender,
-                        {
-                            text:
-                                captionText
+                            step:
+                                "WAITING_FOR_ADDRESS",
+
+                            item:
+                                matchedItem
+
+                        };
+
+                        // ==================================
+                        // ORDER MESSAGE
+                        // ==================================
+
+                        const captionText =
+                            `🛒 *Order Started!*\n\n` +
+
+                            `You selected: *${matchedItem.name}*\n` +
+
+                            `Price: ₹${matchedItem.price}\n\n` +
+
+                            `Please reply with your *Full Name, Phone Number, and Delivery Address*.`;
+
+                        // ==================================
+                        // SEND IMAGE OR TEXT
+                        // ==================================
+
+                        if (
+                            matchedItem.imageUrl
+                        ) {
+
+                            try {
+
+                                await sock.sendMessage(
+                                    sender,
+                                    {
+                                        image: {
+                                            url:
+                                                matchedItem.imageUrl
+                                        },
+
+                                        caption:
+                                            captionText
+                                    }
+                                );
+
+                            } catch (error) {
+
+                                console.log(
+                                    "Image send failed:",
+                                    error.message
+                                );
+
+                                await sock.sendMessage(
+                                    sender,
+                                    {
+                                        text:
+                                            captionText
+                                    }
+                                );
+
+                            }
+
+                        } else {
+
+                            await sock.sendMessage(
+                                sender,
+                                {
+                                    text:
+                                        captionText
+                                }
+                            );
+
                         }
-                    );
 
-                }
-
-                return;
-
-            }
-
-            // ===============================
-            // ORDER HELP
-            // ===============================
-
-            else if (
-                text === "order"
-            ) {
-
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-`🛒 *How to order:*
-
-Please type 'order' followed by the dish name.
-
-Example:
-*order pizza*`
+                        return;
                     }
-                );
 
-                return;
+                    // ==================================
+                    // ONLY "ORDER"
+                    // ==================================
 
-            }
+                    if (
+                        text === "order"
+                    ) {
 
-            // ===============================
-            // MENU
-            // ===============================
+                        await sock.sendMessage(
+                            sender,
+                            {
+                                text:
+                                    `🛒 *How to order:*\n\n` +
 
-            else if (
-                text.includes("menu") ||
-                text.includes("price") ||
-                text.includes("list") ||
-                text.includes("food")
-            ) {
+                                    `Please type:\n` +
 
-                const currentMenu =
-                    await getMenuFromApp();
+                                    `*order [dish name]*\n\n` +
 
-                if (
-                    currentMenu.length === 0
-                ) {
+                                    `Example:\n` +
 
-                    await sock.sendMessage(
-                        sender,
-                        {
-                            text:
-                                "Our menu is currently empty or updating. Please check back soon!"
+                                    `*order pizza*`
+                            }
+                        );
+
+                        return;
+                    }
+
+                    // ==================================
+                    // MENU
+                    // ==================================
+
+                    if (
+                        text.includes("menu") ||
+                        text.includes("price") ||
+                        text.includes("list") ||
+                        text.includes("food")
+                    ) {
+
+                        const currentMenu =
+                            await getMenuFromApp();
+
+                        if (
+                            currentMenu.length === 0
+                        ) {
+
+                            await sock.sendMessage(
+                                sender,
+                                {
+                                    text:
+                                        "⚠️ Our menu is currently empty or updating.\n\nPlease check back soon."
+                                }
+                            );
+
+                            return;
                         }
-                    );
 
-                    return;
+                        let menuMessage =
+                            "🍔 *JAVAGOAT LIVE MENU* 🍕\n\n";
 
-                }
+                        currentMenu.forEach(
+                            item => {
 
-                let menuMessage =
-                    "🍔 *JAVAGOAT LIVE MENU* 🍕\n\n";
+                                menuMessage +=
+                                    `🔸 *${item.name}* - ₹${item.price}\n`;
 
-                currentMenu.forEach(
-                    item => {
+                            }
+                        );
 
                         menuMessage +=
-`🔸 *${item.name}* - ₹${item.price}\n`;
+                            "\n📌 To order, type:\n";
 
+                        menuMessage +=
+                            "*order [dish name]*";
+
+                        await sock.sendMessage(
+                            sender,
+                            {
+                                text:
+                                    menuMessage
+                            }
+                        );
+
+                        return;
                     }
-                );
 
-                menuMessage +=
-                    "\n_To order, reply with 'order [dish name]'_";
+                    // ==================================
+                    // HELLO
+                    // ==================================
 
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-                            menuMessage
+                    if (
+                        text.includes("hi") ||
+                        text.includes("hello") ||
+                        text.includes("hey")
+                    ) {
+
+                        await sock.sendMessage(
+                            sender,
+                            {
+                                text:
+                                    `👋 *Welcome to Haroonworld!*\n\n` +
+
+                                    `I am your AI Assistant.\n\n` +
+
+                                    `🍔 Type *menu* to see our delicious food.\n\n` +
+
+                                    `🛒 Type *order [dish]* to buy instantly.`
+                            }
+                        );
+
+                        return;
                     }
-                );
 
-                return;
+                    // ==================================
+                    // CONTACT
+                    // ==================================
+
+                    if (
+                        text.includes("contact") ||
+                        text.includes("call")
+                    ) {
+
+                        await sock.sendMessage(
+                            sender,
+                            {
+                                text:
+                                    `📞 *Contact Haroonxagent*\n\n` +
+
+                                    `📧 Email:\n` +
+
+                                    `support haroonminhasb9t2@gmail.com`
+                            }
+                        );
+
+                        return;
+                    }
+
+                    // ==================================
+                    // DEFAULT REPLY
+                    // ==================================
+
+                    await sock.sendMessage(
+                        sender,
+                        {
+                            text:
+                                `🤔 I didn't quite catch that.\n\n` +
+
+                                `Type *menu* to see our food list.\n\n` +
+
+                                `Or type *order [food]* to place an order.`
+                        }
+                    );
+
+                } catch (error) {
+
+                    console.log(
+                        "❌ Message Handler Error:",
+                        error.message
+                    );
+
+                }
 
             }
+        );
 
-            // ===============================
-            // GREETING
-            // ===============================
+    } catch (error) {
 
-            else if (
-                text.includes("hi") ||
-                text.includes("hello") ||
-                text.includes("hey")
-            ) {
+        console.log("");
+        console.log(
+            "❌ BOT START ERROR:"
+        );
 
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-`👋 *Welcome to Haroonworld!*
+        console.log(
+            error
+        );
 
-I am your AI Assistant.
+        console.log("");
+        console.log(
+            "🔄 Retrying in 10 seconds..."
+        );
 
-Type *menu* to see our delicious food, or type *order [dish]* to buy instantly!`
-                    }
-                );
+        setTimeout(() => {
 
-                return;
+            startBot();
 
-            }
-
-            // ===============================
-            // CONTACT
-            // ===============================
-
-            else if (
-                text.includes("contact") ||
-                text.includes("call")
-            ) {
-
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-`📞 *Contact Haroonxagent:*
-
-- *Email:* support haroonminhasb9t2@gmail.com`
-                    }
-                );
-
-                return;
-
-            }
-
-            // ===============================
-            // DEFAULT
-            // ===============================
-
-            else {
-
-                await sock.sendMessage(
-                    sender,
-                    {
-                        text:
-`🤔 I didn't quite catch that.
-
-Type *menu* to see our food list, or *order [food]* to place an order!`
-                    }
-                );
-
-            }
-
-        }
-    );
-
+        }, 10000);
+    }
 }
 
-// ===============================
+// ==========================================
 // START
-// ===============================
+// ==========================================
 
-startBot().catch(
-    err =>
-        console.log(
-            "Error:",
-            err
-        )
-);
+startBot();
